@@ -1,13 +1,8 @@
 package unitbv.devops.authenticationapi.dto.auth;
 
-public class LoginResponse {
+public class TokenRefreshRequest {
     private String accessToken;
     private String refreshToken;
-
-    public LoginResponse(String accessToken, String refreshToken) {
-        this.accessToken = accessToken;
-        this.refreshToken = refreshToken;
-    }
 
     public String getAccessToken() { return accessToken; }
     public void setAccessToken(String accessToken) { this.accessToken = accessToken; }
