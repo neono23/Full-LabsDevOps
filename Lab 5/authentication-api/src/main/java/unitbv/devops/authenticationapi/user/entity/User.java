@@ -35,6 +35,9 @@ public class User {
     @Column(name = "role")
     private Set<Role> roles;
 
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    private Set<Token> tokens;
+
     @Column(nullable = false)
     private Instant createdAt;
 

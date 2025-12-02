@@ -2,18 +2,23 @@ package unitbv.devops.authenticationapi.controller;
 
 import unitbv.devops.authenticationapi.dto.auth.LoginRequest;
 import unitbv.devops.authenticationapi.dto.auth.LoginResponse;
+import unitbv.devops.authenticationapi.dto.auth.RegisterRequest;
 import unitbv.devops.authenticationapi.dto.auth.TokenRefreshRequest;
+import unitbv.devops.authenticationapi.user.entity.Role;
 import unitbv.devops.authenticationapi.user.entity.Token;
 import unitbv.devops.authenticationapi.user.entity.User;
 import unitbv.devops.authenticationapi.user.repository.TokenRepository;
 import unitbv.devops.authenticationapi.user.repository.UserRepository;
 import unitbv.devops.authenticationapi.util.JwtUtil;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @RestController
@@ -27,38 +32,49 @@ public class AuthController {
     private TokenRepository tokenRepository;
 
     @Autowired
-    private PasswordEncoder passwordEncoder;
-
-    @Autowired
     private JwtUtil jwtUtil;
 
-    @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody LoginRequest loginRequest) {
-        // Find user by username or email
-        User user = userRepository.findByUsername(loginRequest.usernameOrEmail())
-                .or(() -> userRepository.findByEmail(loginRequest.usernameOrEmail()))
-                .orElseThrow(() -> new RuntimeException("User not found"));
+    @Autowired
+    private PasswordEncoder passwordEncoder;
 
-        // Validate password (User entity uses passwordHash field)
-        if (!passwordEncoder.matches(loginRequest.password(), user.getPasswordHash())) {
-            return ResponseEntity.status(401).body("Invalid credentials");
+    @PostMapping("/register")
+    public ResponseEntity<?> register(@RequestBody RegisterRequest request) {
+        if (userRepository.existsByUsername(request.username())) {
+            return ResponseEntity.badRequest().body("Username already exists");
+        }
+        if (userRepository.existsByEmail(request.email())) {
+            return ResponseEntity.badRequest().body("Email already exists");
         }
 
-        // Extract roles from user (roles is a Set<Role> enum)
-        List<String> roles = user.getRoles().stream()
-                .map(Enum::name)
-                .collect(Collectors.toList());
+        User user = new User();
+        user.setUsername(request.username());
+        user.setEmail(request.email());
+        user.setPasswordHash(passwordEncoder.encode(request.password()));
+        user.setRoles(Set.of(Role.USER));
+        user.setCreatedAt(Instant.now());
+        user.setEnabled(true);
+
+        userRepository.save(user);
+        return ResponseEntity.ok("User registered successfully");
+    }
+
+    @PostMapping("/login")
+    public ResponseEntity<?> login(@RequestBody LoginRequest request) {
+        User user = userRepository.findByUsername(request.usernameOrEmail())
+                .or(() -> userRepository.findByEmail(request.usernameOrEmail()))
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+        }
 
         // Generate tokens
+        List<String> roles = user.getRoles().stream().map(Enum::name).collect(Collectors.toList());
         String accessToken = jwtUtil.generateAccessToken(user.getUsername(), roles);
         String refreshToken = jwtUtil.generateRefreshToken(user.getUsername());
 
         // Save tokens to database
-        Token token = new Token();
-        token.setAccessToken(accessToken);
-        token.setRefreshToken(refreshToken);
-        token.setUser(user);
-        token.setBlacklisted(false);
+        Token token = new Token(accessToken, refreshToken, user);
         tokenRepository.save(token);
 
         return ResponseEntity.ok(new LoginResponse(accessToken, refreshToken));
@@ -67,37 +83,26 @@ public class AuthController {
     @PostMapping("/token")
     public ResponseEntity<?> refreshToken(@RequestBody TokenRefreshRequest request) {
         // Find the token pair
-        Token token = tokenRepository.findByAccessTokenAndRefreshToken(
-                        request.getAccessToken(), request.getRefreshToken())
+        Token existingToken = tokenRepository
+                .findByAccessTokenAndRefreshToken(request.getAccessToken(), request.getRefreshToken())
                 .orElseThrow(() -> new RuntimeException("Invalid token pair"));
 
-        // Blacklist the old token pair
-        token.setBlacklisted(true);
-        tokenRepository.save(token);
+        // Mark as blacklisted
+        existingToken.setBlacklisted(true);
+        tokenRepository.save(existingToken);
 
-        // Validate refresh token
+        // Validate refresh token and get user
         String username = jwtUtil.extractUsername(request.getRefreshToken());
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        if (!jwtUtil.validateToken(request.getRefreshToken(), username)) {
-            return ResponseEntity.status(401).body("Invalid refresh token");
-        }
-
         // Generate new token pair
-        List<String> roles = user.getRoles().stream()
-                .map(Enum::name)
-                .collect(Collectors.toList());
+        List<String> roles = user.getRoles().stream().map(Enum::name).collect(Collectors.toList());
+        String newAccessToken = jwtUtil.generateAccessToken(user.getUsername(), roles);
+        String newRefreshToken = jwtUtil.generateRefreshToken(user.getUsername());
 
-        String newAccessToken = jwtUtil.generateAccessToken(username, roles);
-        String newRefreshToken = jwtUtil.generateRefreshToken(username);
-
-        // Save new tokens to database
-        Token newToken = new Token();
-        newToken.setAccessToken(newAccessToken);
-        newToken.setRefreshToken(newRefreshToken);
-        newToken.setUser(user);
-        newToken.setBlacklisted(false);
+        // Save new tokens
+        Token newToken = new Token(newAccessToken, newRefreshToken, user);
         tokenRepository.save(newToken);
 
         return ResponseEntity.ok(new LoginResponse(newAccessToken, newRefreshToken));
